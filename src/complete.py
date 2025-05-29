@@ -65,14 +65,12 @@ class CO2Predictor:
         for metric, value in evaluation.items():
             print(f"  {metric}: {value:.6f}")
 
-        # show future predictions
         futurePreds = self.df[self.df[columnName].notna() & self.df["Value"].isna()]
         if not futurePreds.empty:
             print("\nfuture predictions:")
             for _, row in futurePreds.iterrows():
                 print(f"  {row['Date']}: {row[columnName]:.2f}")
 
-    # Moving Average Methods
     def movingAvg(self, data, windowSize):
         weights = np.ones(windowSize) / windowSize
         return np.convolve(data, weights, mode="valid")
@@ -94,7 +92,6 @@ class CO2Predictor:
         validData = self.df[self.df["Value"].notna()].copy()
         ma = self.movingAvg(validData["Value"].values, windowSize)
 
-        # pad with NaN for first windowSize-1 values
         paddedMa = np.pad(ma, (windowSize - 1, 0), "constant", constant_values=np.nan)
         self.df["MovingAvg"] = np.nan
 
@@ -103,7 +100,6 @@ class CO2Predictor:
             if i < len(paddedMa):
                 self.df.loc[idx, "MovingAvg"] = paddedMa[i]
 
-        # future predictions
         predictions = self.predictWithMovingAvg(validData["Value"].values, windowSize)
         futureRows = self.df[self.df["Value"].isna()].index
 
@@ -134,13 +130,11 @@ class CO2Predictor:
         data = validDf["Value"].values
         ratio, paddedMa = self.ratioToMovingAverage(data, windowSize)
 
-        # add RMA columns
         if "RMA" not in self.df.columns:
             self.df["RMA"] = np.nan
         if "RMA_Pred" not in self.df.columns:
             self.df["RMA_Pred"] = np.nan
 
-        # populate RMA values for valid data
         validIndices = self.df[self.df["Value"].notna()].index
         for i, idx in enumerate(validIndices):
             if i < len(ratio):
@@ -148,10 +142,8 @@ class CO2Predictor:
             if i < len(paddedMa):
                 self.df.loc[idx, "MovingAvg"] = paddedMa[i]
 
-        # calculate seasonal index
         idxSeasonal = self.seasonalIndex(validDf.assign(RMA=ratio), "RMA")
 
-        # generate future predictions
         lastDate = pd.to_datetime(validDf.iloc[-1]["Date"])
 
         for i in range(nFuture):
@@ -161,16 +153,13 @@ class CO2Predictor:
             seasonal = idxSeasonal.loc[predMonth]
             pred = ma * seasonal / 100
 
-            # update existing row
             futureDateStr = futureDate.strftime("%Y-%m-%d")
             mask = self.df["Date"] == futureDateStr
             if mask.any():
                 self.df.loc[mask, "RMA_Pred"] = pred
 
-            # update data for next iteration
             data = np.append(data, pred)
 
-        # add historical predictions for evaluation
         for i in range(windowSize - 1, len(validDf)):
             validIdx = validIndices[i]
             month = pd.to_datetime(self.df.loc[validIdx, "Date"]).month
@@ -185,7 +174,6 @@ class CO2Predictor:
         }
         self.printResults("Ratio to Moving Average", "RMA_Pred", additionalInfo)
 
-    # Percentage Average
     def percentageAverageSeasonalIndex(self, df):
         """calculate seasonal index using percentage average method"""
         dfCopy = df.copy()
@@ -206,16 +194,24 @@ class CO2Predictor:
         if "PercAvg_Pred" not in self.df.columns:
             self.df["PercAvg_Pred"] = np.nan
 
-        # generate predictions for all data points
         self.df["Date"] = pd.to_datetime(self.df["Date"])
 
-        for index, row in self.df.iterrows():
+        historicalRows = self.df[self.df["Value"].notna()]
+        for index, row in historicalRows.iterrows():
             month = row["Date"].month
             seasonal = idxSeasonal.loc[month]
             pred = overallAvg * seasonal / 100
             self.df.loc[index, "PercAvg_Pred"] = pred
 
-        # convert back to string format
+        futureRows = self.df[self.df["Value"].isna()]
+        for i, (index, row) in enumerate(futureRows.iterrows()):
+            if i >= nFuture:
+                break
+            month = row["Date"].month
+            seasonal = idxSeasonal.loc[month]
+            pred = overallAvg * seasonal / 100
+            self.df.loc[index, "PercAvg_Pred"] = pred
+
         self.df["Date"] = self.df["Date"].dt.strftime("%Y-%m-%d")
 
         additionalInfo = {
@@ -224,7 +220,6 @@ class CO2Predictor:
         }
         self.printResults("Percentage Average", "PercAvg_Pred", additionalInfo)
 
-    # Exponential Smoothing
     def exponentialSmoothing(self, data, alpha):
         """calculate exponential smoothing values"""
         result = [data[0]]
@@ -241,7 +236,6 @@ class CO2Predictor:
         smoothed = self.exponentialSmoothing(validData, alpha)
         lastSmoothedValue = smoothed[-1]
 
-        # calculate trend from recent values
         recentValues = smoothed[-3:] if len(smoothed) >= 3 else smoothed
         if len(recentValues) >= 2:
             trend = (recentValues[-1] - recentValues[0]) / len(recentValues)
@@ -250,7 +244,7 @@ class CO2Predictor:
 
         predictions = []
         for i in range(forecastHorizon):
-            dampingFactor = 0.9**i  # exponential dampening
+            dampingFactor = 0.9**i
             currentValue = lastSmoothedValue + (trend * (i + 1) * dampingFactor)
             predictions.append(currentValue)
 
@@ -266,12 +260,10 @@ class CO2Predictor:
         if "ExpSmooth" not in self.df.columns:
             self.df["ExpSmooth"] = np.nan
 
-        # populate smoothed values for historical data
         actualIndices = self.df["Value"].dropna().index
         for i, idx in enumerate(actualIndices):
             self.df.loc[idx, "ExpSmooth"] = smoothedValues[i]
 
-        # generate future predictions
         predictions = self.predictWithExponentialSmoothing(
             actualValues, alpha, forecastHorizon
         )
@@ -283,7 +275,6 @@ class CO2Predictor:
         additionalInfo = {"alpha": alpha, "forecast horizon": forecastHorizon}
         self.printResults("Exponential Smoothing", "ExpSmooth", additionalInfo)
 
-    # Monte Carlo Simulation
     def execMonteCarlo(self, nFuture=12, nSim=1000, windowSize=12):
         """execute monte carlo simulation prediction"""
         self.addFutureDates(nFuture)
@@ -296,7 +287,6 @@ class CO2Predictor:
         if "MonteCarlo_Pred" not in self.df.columns:
             self.df["MonteCarlo_Pred"] = np.nan
 
-        # generate historical predictions for evaluation
         for i in range(windowSize, len(values)):
             sims = []
             for _ in range(nSim):
@@ -309,7 +299,6 @@ class CO2Predictor:
             valueIndex = self.df["Value"].dropna().index[i]
             self.df.loc[valueIndex, "MonteCarlo_Pred"] = pred
 
-        # generate future predictions
         lastValue = values[-1]
         futurePreds = []
 
@@ -323,7 +312,6 @@ class CO2Predictor:
             pred = np.mean(sims)
             futurePreds.append(pred)
 
-        # populate future predictions
         futureRows = self.df[self.df["Value"].isna()].index
         for i, idx in enumerate(futureRows[: len(futurePreds)]):
             self.df.loc[idx, "MonteCarlo_Pred"] = futurePreds[i]
@@ -336,7 +324,6 @@ class CO2Predictor:
         }
         self.printResults("Monte Carlo Simulation", "MonteCarlo_Pred", additionalInfo)
 
-    # Visualization
     def plotTimeSeries(
         self, valueCol="Value", otherCols=None, title="CO2 Levels Over Time"
     ):
@@ -346,21 +333,21 @@ class CO2Predictor:
 
         plt.figure(figsize=(14, 6))
 
-        # plot main value column
+        dates = pd.to_datetime(self.df["Date"])
+
         plt.plot(
-            self.df["Date"],
+            dates,
             self.df[valueCol],
             color="royalblue",
             linewidth=2,
             label=f"Actual {valueCol}",
         )
 
-        # plot other columns
         colors = sns.color_palette("Set2", len(otherCols))
         for i, col in enumerate(otherCols):
             if col in self.df.columns:
                 plt.plot(
-                    self.df["Date"],
+                    dates,
                     self.df[col],
                     color=colors[i],
                     linewidth=2,
@@ -368,8 +355,7 @@ class CO2Predictor:
                     label=f"{col}",
                 )
 
-        # add vertical line at last actual data point
-        lastActualDate = self.df[~self.df[valueCol].isna()]["Date"].max()
+        lastActualDate = dates[~self.df[valueCol].isna()].max()
         plt.axvline(x=lastActualDate, color="gray", linestyle="--", alpha=0.7)
         plt.text(
             lastActualDate,
@@ -396,7 +382,6 @@ class CO2Predictor:
         dfCopy = self.df.copy()
         dfCopy["Year"] = pd.to_datetime(dfCopy["Date"]).dt.year
 
-        # prepare aggregation dictionary
         aggDict = {valueCol: "mean"}
         for col in otherCols:
             if col in dfCopy.columns:
@@ -416,7 +401,6 @@ class CO2Predictor:
             label=f"Actual {valueCol}",
         )
 
-        # plot other columns
         colors = sns.color_palette("Set2", len(otherCols))
         for i, col in enumerate(otherCols):
             if col in yearlyData.columns:
@@ -430,7 +414,6 @@ class CO2Predictor:
                     label=f"{col}",
                 )
 
-        # vertical line for prediction boundary
         plt.axvline(x=lastActualYear, color="gray", linestyle="--", alpha=0.7)
         plt.text(
             lastActualYear,
@@ -453,14 +436,12 @@ class CO2Predictor:
         print("CO2 Prediction Analysis")
         print("=" * 60)
 
-        # execute all methods
         self.execMovingAvg(windowSize=12)
         self.execRMA(windowSize=12, nFuture=12)
         self.execPercentageAverage(nFuture=12)
         self.execExponentialSmoothing(alpha=0.3, forecastHorizon=12)
         self.execMonteCarlo(nFuture=12, nSim=1000, windowSize=12)
 
-        # create visualization
         predictionCols = [
             "MovingAvg",
             "RMA_Pred",
@@ -497,19 +478,14 @@ class CO2Predictor:
         print(f"\nresults exported to: {outputPath}")
 
 
-# Main execution
 if __name__ == "__main__":
-    # initialize predictor
     dir = os.path.dirname(os.path.abspath(__file__))
     predictor = CO2Predictor(os.path.join(dir, "..", "preprocessed-data.csv"))
 
-    # run all methods and get results
     resultDf = predictor.runAllMethods()
 
-    # export results
     predictor.exportResults(outputPath=os.path.join(dir, "..", "processed-data.csv"))
 
-    # display summary
     print("\nFinal DataFrame Preview:")
     print("=" * 60)
     print(resultDf.head(20))
