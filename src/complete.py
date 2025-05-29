@@ -5,6 +5,9 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from dateutil.relativedelta import relativedelta
+from sklearn.linear_model import LinearRegression
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 
 class CO2Predictor:
@@ -42,13 +45,16 @@ class CO2Predictor:
     def addFutureDates(self, nFuture=12):
         lastDate = pd.to_datetime(self.df["Date"].iloc[-1])
 
-        for i in range(nFuture):
+        existingFutureDates = len(self.df[self.df["Value"].isna()])
+
+        datesToAdd = max(0, nFuture - existingFutureDates)
+
+        for i in range(datesToAdd):
             futureDate = lastDate + relativedelta(months=i + 1)
             futureDateStr = futureDate.strftime("%Y-%m-%d")
 
-            if futureDateStr not in self.df["Date"].values:
-                newRow = pd.DataFrame({"Date": [futureDateStr], "Value": [np.nan]})
-                self.df = pd.concat([self.df, newRow], ignore_index=True)
+            newRow = pd.DataFrame({"Date": [futureDateStr], "Value": [np.nan]})
+            self.df = pd.concat([self.df, newRow], ignore_index=True)
 
         self.df = self.df.sort_values("Date").reset_index(drop=True)
 
@@ -324,6 +330,216 @@ class CO2Predictor:
         }
         self.printResults("Monte Carlo Simulation", "MonteCarlo_Pred", additionalInfo)
 
+    def findOptimalArima(self, timeSeries, maxP=5, maxD=2, maxQ=5):
+        bestAic = np.inf
+        bestOrder = None
+
+        print("finding optimal ARIMA parameters...")
+
+        for p in range(maxP + 1):
+            for d in range(maxD + 1):
+                for q in range(maxQ + 1):
+                    try:
+                        model = ARIMA(timeSeries, order=(p, d, q))
+                        modelFit = model.fit()
+
+                        if modelFit.aic < bestAic:
+                            bestAic = modelFit.aic
+                            bestOrder = (p, d, q)
+
+                    # i will use it bare, fk u
+                    except:
+                        continue
+
+        print(f"best ARIMA order: {bestOrder}")
+        print(f"best AIC: {bestAic}")
+        return bestOrder
+
+    def execArima(self, nFuture=12, order=None):
+        """execute ARIMA prediction"""
+        self.addFutureDates(nFuture)
+
+        dfCopy = self.df.copy()
+        dfCopy["Date"] = pd.to_datetime(dfCopy["Date"])
+        dfCopy.set_index("Date", inplace=True)
+
+        timeSeries = dfCopy["Value"].dropna()
+
+        # there should be no need of ever using these? i think? idk imma put this shi hir
+        if order is None:
+            order = self.findOptimalArima(timeSeries)
+
+        model = ARIMA(timeSeries, order=order)
+        modelFit = model.fit()
+
+        # yes it print out sarima, i think its because of the overlaying model that do so.
+        # but in the end, as long as there is no seasonal order, it technically is ARIMA
+        # https://www.statsmodels.org/stable/generated/statsmodels.tsa.arima.model.ARIMA.html
+        # cite?, integration models: ARIMA(p, d, q)
+        print(f"\nARIMA{order} Model Summary:")
+        print(f"AIC: {modelFit.aic:.4f}")
+        print(f"BIC: {modelFit.bic:.4f}")
+        print(f"Log Likelihood: {modelFit.llf:.4f}")
+
+        inSamplePred = modelFit.fittedvalues
+
+        if "ArimaPred" not in self.df.columns:
+            self.df["ArimaPred"] = np.nan
+
+        validIndices = self.df["Value"].dropna().index
+        for i, idx in enumerate(validIndices):
+            if i < len(inSamplePred):
+                if i > 0:
+                    self.df.loc[idx, "ArimaPred"] = inSamplePred.iloc[i]
+
+        # make future predictions
+        forecast = modelFit.forecast(steps=nFuture)
+        futureRows = self.df[self.df["Value"].isna()].index
+
+        for i, idx in enumerate(futureRows[: len(forecast)]):
+            self.df.loc[idx, "ArimaPred"] = (
+                forecast.iloc[i] if hasattr(forecast, "iloc") else forecast[i]
+            )
+
+        additionalInfo = {
+            "order": f"({order[0]}, {order[1]}, {order[2]})",
+            "AIC": f"{modelFit.aic:.4f}",
+            "BIC": f"{modelFit.bic:.4f}",
+        }
+        self.printResults("ARIMA", "ArimaPred", additionalInfo)
+
+    def findOptimalSarima(
+        self,
+        timeSeries,
+        maxP=3,
+        maxD=2,
+        maxQ=3,
+        maxSeasonalP=2,
+        maxSeasonalD=1,
+        maxSeasonalQ=2,
+        seasonalPeriod=12,
+    ):
+        bestAic = np.inf
+        bestOrder = None
+        bestSeasonalOrder = None
+
+        print("Finding optimal SARIMA parameters...")
+
+        for p in range(maxP + 1):
+            for d in range(maxD + 1):
+                for q in range(maxQ + 1):
+                    for P in range(maxSeasonalP + 1):
+                        for D in range(maxSeasonalD + 1):
+                            for Q in range(maxSeasonalQ + 1):
+                                try:
+                                    model = SARIMAX(
+                                        timeSeries,
+                                        order=(p, d, q),
+                                        seasonal_order=(P, D, Q, seasonalPeriod),
+                                    )
+                                    modelFit = model.fit(disp=False)
+
+                                    if modelFit.aic < bestAic:
+                                        bestAic = modelFit.aic
+                                        bestOrder = (p, d, q)
+                                        bestSeasonalOrder = (P, D, Q, seasonalPeriod)
+
+                                except:
+                                    continue
+
+        print(f"Best SARIMA order: {bestOrder}")
+        print(f"Best seasonal order: {bestSeasonalOrder}")
+        print(f"Best AIC: {bestAic}")
+        return bestOrder, bestSeasonalOrder
+
+    def execSarima(
+        self,
+        nFuture=12,
+        order=(1, 1, 1),
+        seasonalOrder=(1, 1, 1, 12),
+    ):
+        self.addFutureDates(nFuture)  # add missing line
+        dfCopy = self.df.copy()
+        dfCopy["Date"] = pd.to_datetime(dfCopy["Date"])
+        dfCopy.set_index("Date", inplace=True)
+
+        timeSeries = dfCopy["Value"].dropna()
+
+        if order is None:
+            order, seasonalOrder = self.findOptimalSarima(timeSeries)
+
+        model = SARIMAX(timeSeries, order=order, seasonal_order=seasonalOrder)
+        modelFit = model.fit()
+
+        print(f"\nSARIMA{order} Model Summary:")
+        print(f"AIC: {modelFit.aic:.4f}")
+        print(f"BIC: {modelFit.bic:.4f}")
+        print(f"Log Likelihood: {modelFit.llf:.4f}")
+
+        inSamplePred = modelFit.fittedvalues
+        if "SarimaPred" not in self.df.columns:
+            self.df["SarimaPred"] = np.nan
+
+        validIndices = self.df["Value"].dropna().index
+        for i, idx in enumerate(validIndices):
+            if i < len(inSamplePred):
+                if i > 0:
+                    self.df.loc[idx, "SarimaPred"] = inSamplePred.iloc[i]
+
+        # make future predictions
+        forecast = modelFit.forecast(steps=nFuture)
+        futureRows = self.df[self.df["Value"].isna()].index
+
+        for i, idx in enumerate(futureRows[: len(forecast)]):
+            self.df.loc[idx, "SarimaPred"] = (
+                forecast.iloc[i] if hasattr(forecast, "iloc") else forecast[i]
+            )
+
+        additionalInfo = {
+            "order": f"({order[0]}, {order[1]}, {order[2]})",
+            "AIC": f"{modelFit.aic:.4f}",
+            "BIC": f"{modelFit.bic:.4f}",
+        }
+
+        self.printResults("SARIMA", "SarimaPred", additionalInfo)
+
+    def execLinearRegression(self, steps=12):
+        self.addFutureDates(steps)
+
+        dfCopy = self.df.copy()
+        dfCopy["Date"] = pd.to_datetime(dfCopy["Date"])
+
+        startDate = dfCopy["Date"].min()
+        dfCopy["timeIndex"] = (dfCopy["Date"] - startDate).dt.days / 30.44
+
+        validData = dfCopy.dropna(subset=["Value"])
+        x = validData["timeIndex"].values.reshape(-1, 1)
+        y = validData["Value"].values
+
+        model = LinearRegression()
+        model.fit(x, y)
+
+        print(f"\nLinear Regression Model:")
+        print(f"R² Score: {model.score(x, y):.6f}")
+        print(f"Coefficient: {model.coef_[0]:.6f}")
+        print(f"Intercept: {model.intercept_:.6f}")
+
+        if "LinearRegPred" not in self.df.columns:
+            self.df["LinearRegPred"] = np.nan
+
+        allTimeIndex = (pd.to_datetime(self.df["Date"]) - startDate).dt.days / 30.44
+        allPredictions = model.predict(allTimeIndex.values.reshape(-1, 1))
+
+        for i, idx in enumerate(self.df.index):
+            self.df.loc[idx, "LinearRegPred"] = allPredictions[i]
+
+        additionalInfo = {
+            "R² score": f"{model.score(x, y):.6f}",
+            "coefficient": f"{model.coef_[0]:.6f}",
+            "intercept": f"{model.intercept_:.6f}",
+        }
+        self.printResults("Linear Regression", "LinearRegPred", additionalInfo)
+
     def plotTimeSeries(
         self, valueCol="Value", otherCols=None, title="CO2 Levels Over Time"
     ):
@@ -441,6 +657,9 @@ class CO2Predictor:
         self.execPercentageAverage(nFuture=12)
         self.execExponentialSmoothing(alpha=0.3, forecastHorizon=12)
         self.execMonteCarlo(nFuture=12, nSim=1000, windowSize=12)
+        self.execArima(nFuture=12, order=(5, 1, 5))
+        self.execSarima(nFuture=12, order=(1, 1, 1), seasonalOrder=(1, 1, 1, 12))
+        self.execLinearRegression(steps=12)
 
         predictionCols = [
             "MovingAvg",
@@ -448,6 +667,9 @@ class CO2Predictor:
             "PercAvg_Pred",
             "ExpSmooth",
             "MonteCarlo_Pred",
+            "ArimaPred",
+            "SarimaPred",
+            "LinearRegPred",
         ]
 
         self.plotTimeSeries(
