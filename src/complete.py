@@ -16,31 +16,90 @@ class CO2Predictor:
         self.originalDf = self.df.copy()
 
     def evaluateModel(self, predictedColumnName):
-        """evaluate model performance using MSE, RMSE, MAE, and MAPE"""
         validDf = self.df.dropna(subset=["Value", predictedColumnName])
 
         if len(validDf) == 0:
-            return {"mse": np.nan, "rmse": np.nan, "mae": np.nan, "mape": np.nan}
+            return {
+                "mse": np.nan,
+                "rmse": np.nan,
+                "msle": np.nan,
+                "mae": np.nan,
+                "mape": np.nan,
+                "r2": np.nan,
+                "r": np.nan,
+                "r2_adj": np.nan,
+                "rse": np.nan,
+            }
 
-        actual = validDf["Value"]
-        predicted = validDf[predictedColumnName]
+        actual = validDf["Value"].values
+        predicted = validDf[predictedColumnName].values
 
-        mse = np.mean((actual - predicted) ** 2)
+        errors = actual - predicted
+        squaredErr = errors**2
+        absErr = np.abs(errors)
+
+        # mse and rmse
+        mse = np.mean(squaredErr)
         rmse = np.sqrt(mse)
-        mae = np.mean(np.abs(actual - predicted))
 
-        nonZeroActual = actual[actual != 0]
-        nonZeroPredicted = predicted[actual != 0]
+        # msle (mean squared logarithmic error)
+        # only calculate if all values are positive
+        if np.all(actual > 0) and np.all(predicted > 0):
+            msle = np.mean((np.log1p(actual) - np.log1p(predicted)) ** 2)
+        else:
+            msle = np.nan
 
-        if len(nonZeroActual) > 0:
-            mape = (
-                np.mean(np.abs((nonZeroActual - nonZeroPredicted) / nonZeroActual))
-                * 100
-            )
+        # mae
+        mae = np.mean(absErr)
+
+        # mape (mean absolute percentage error)
+        nonZeroMask = actual != 0
+        if np.any(nonZeroMask):
+            mape = np.mean(np.abs(errors[nonZeroMask] / actual[nonZeroMask])) * 100
         else:
             mape = np.nan
 
-        return {"mse": mse, "rmse": rmse, "mae": mae, "mape": mape}
+        # r² and correlation
+        actualMean = np.mean(actual)
+        TSS = np.sum((actual - actualMean) ** 2)
+        RSS = np.sum(squaredErr)
+
+        if TSS != 0:
+            rSquared = 1 - (RSS / TSS)
+
+            actualStd = np.std(actual, ddof=1)
+            predictedStd = np.std(predicted, ddof=1)
+
+            if actualStd != 0 and predictedStd != 0:
+                covariance = np.mean(
+                    (actual - np.mean(actual)) * (predicted - np.mean(predicted))
+                )
+                r = covariance / (actualStd * predictedStd)
+            else:
+                r = np.nan
+
+            n = len(actual)
+
+            p = 1
+            rSquaredAdj = 1 - ((1 - rSquared) * (n - 1) / (n - p - 1))
+            rse = np.sqrt(RSS / (n - 2))
+        else:
+            rSquared = np.nan
+            r = np.nan
+            rSquaredAdj = np.nan
+            rse = np.nan
+
+        return {
+            "mse": mse,
+            "rmse": rmse,
+            "msle": msle,
+            "mae": mae,
+            "mape": mape,
+            "rSquared": rSquared,
+            "r": r,
+            "rSquaredAdj": rSquaredAdj,
+            "rse": rse,
+        }
 
     def addFutureDates(self, nFuture=12):
         lastDate = pd.to_datetime(self.df["Date"].iloc[-1])
@@ -121,7 +180,6 @@ class CO2Predictor:
         return ratio, paddedMa
 
     def seasonalIndex(self, df, ratioCol):
-        """calculate seasonal index from ratios"""
         dfCopy = df.copy()
         dfCopy["Month"] = pd.to_datetime(dfCopy["Date"]).dt.month
         monthlyIndex = dfCopy.groupby("Month")[ratioCol].mean()
@@ -181,7 +239,6 @@ class CO2Predictor:
         self.printResults("Ratio to Moving Average", "RMA_Pred", additionalInfo)
 
     def percentageAverageSeasonalIndex(self, df):
-        """calculate seasonal index using percentage average method"""
         dfCopy = df.copy()
         dfCopy["Month"] = pd.to_datetime(dfCopy["Date"]).dt.month
         overallAvg = dfCopy["Value"].mean()
@@ -191,7 +248,6 @@ class CO2Predictor:
         return monthlyIndex, overallAvg
 
     def execPercentageAverage(self, nFuture=12):
-        """execute percentage average prediction"""
         self.addFutureDates(nFuture)
 
         validDf = self.df[self.df["Value"].notna()].copy()
@@ -227,14 +283,12 @@ class CO2Predictor:
         self.printResults("Percentage Average", "PercAvg_Pred", additionalInfo)
 
     def exponentialSmoothing(self, data, alpha):
-        """calculate exponential smoothing values"""
         result = [data[0]]
         for n in range(1, len(data)):
             result.append(alpha * data[n] + (1 - alpha) * result[n - 1])
         return result
 
     def predictWithExponentialSmoothing(self, data, alpha, forecastHorizon):
-        """predict using exponential smoothing with trend"""
         validData = [x for x in data if pd.notna(x)]
         if len(validData) == 0:
             return [np.nan] * forecastHorizon
@@ -257,7 +311,6 @@ class CO2Predictor:
         return predictions
 
     def execExponentialSmoothing(self, alpha=0.3, forecastHorizon=12):
-        """execute exponential smoothing prediction"""
         self.addFutureDates(forecastHorizon)
 
         actualValues = self.df["Value"].dropna().values
@@ -282,7 +335,6 @@ class CO2Predictor:
         self.printResults("Exponential Smoothing", "ExpSmooth", additionalInfo)
 
     def execMonteCarlo(self, nFuture=12, nSim=1000, windowSize=12):
-        """execute monte carlo simulation prediction"""
         self.addFutureDates(nFuture)
 
         values = self.df["Value"].dropna().values
@@ -356,7 +408,6 @@ class CO2Predictor:
         return bestOrder
 
     def execArima(self, nFuture=12, order=None):
-        """execute ARIMA prediction"""
         self.addFutureDates(nFuture)
 
         dfCopy = self.df.copy()
@@ -483,7 +534,7 @@ class CO2Predictor:
         validIndices = self.df["Value"].dropna().index
         for i, idx in enumerate(validIndices):
             if i < len(inSamplePred):
-                if i > 0:
+                if i >= 12:
                     self.df.loc[idx, "SarimaPred"] = inSamplePred.iloc[i]
 
         # make future predictions
@@ -519,7 +570,7 @@ class CO2Predictor:
         model = LinearRegression()
         model.fit(x, y)
 
-        print(f"\nLinear Regression Model:")
+        print("\nLinear Regression Model:")
         print(f"R² Score: {model.score(x, y):.6f}")
         print(f"Coefficient: {model.coef_[0]:.6f}")
         print(f"Intercept: {model.intercept_:.6f}")
@@ -543,7 +594,6 @@ class CO2Predictor:
     def plotTimeSeries(
         self, valueCol="Value", otherCols=None, title="CO2 Levels Over Time"
     ):
-        """plot time series data with predictions"""
         if otherCols is None:
             otherCols = []
 
@@ -591,7 +641,6 @@ class CO2Predictor:
     def plotYearlyAvg(
         self, valueCol="Value", otherCols=None, title="Annual CO2 Levels"
     ):
-        """plot yearly average CO2 levels"""
         if otherCols is None:
             otherCols = []
 
@@ -658,7 +707,7 @@ class CO2Predictor:
         self.execExponentialSmoothing(alpha=0.3, forecastHorizon=12)
         self.execMonteCarlo(nFuture=12, nSim=1000, windowSize=12)
         self.execArima(nFuture=12, order=(5, 1, 5))
-        self.execSarima(nFuture=12, order=(1, 1, 1), seasonalOrder=(1, 1, 1, 12))
+        self.execSarima(nFuture=12, order=(2, 0, 1), seasonalOrder=(0, 1, 2, 12))
         self.execLinearRegression(steps=12)
 
         predictionCols = [
