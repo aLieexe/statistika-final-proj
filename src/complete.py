@@ -6,6 +6,7 @@ import pandas as pd
 import seaborn as sns
 from dateutil.relativedelta import relativedelta
 from sklearn.linear_model import LinearRegression
+from sklearn.svm import SVR
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 
@@ -155,21 +156,24 @@ class CO2Predictor:
         self.addFutureDates()
 
         validData = self.df[self.df["Value"].notna()].copy()
-        ma = self.movingAvg(validData["Value"].values, windowSize)
 
-        paddedMa = np.pad(ma, (windowSize - 1, 0), "constant", constant_values=np.nan)
         self.df["MovingAvg"] = np.nan
 
-        validIndices = self.df[self.df["Value"].notna()].index
-        for i, idx in enumerate(validIndices):
-            if i < len(paddedMa):
-                self.df.loc[idx, "MovingAvg"] = paddedMa[i]
+        for i in range(windowSize, len(validData) - 1):
+            previousValues = validData["Value"].iloc[i - windowSize : i].values
+            movingAvg = np.mean(previousValues)
 
-        predictions = self.predictWithMovingAvg(validData["Value"].values, windowSize)
+            validIdx = validData.index[i]
+            self.df.loc[validIdx, "MovingAvg"] = movingAvg
+
+        lastWindowValues = validData["Value"].iloc[-windowSize:].values
+        predictions = self.predictWithMovingAvg(lastWindowValues, windowSize)
         futureRows = self.df[self.df["Value"].isna()].index
 
         for i, idx in enumerate(futureRows[: len(predictions)]):
             self.df.loc[idx, "MovingAvg"] = predictions[i]
+
+        print("df", self.df.to_string())
 
         self.printResults("Moving Average", "MovingAvg", {"window size": windowSize})
 
@@ -187,7 +191,6 @@ class CO2Predictor:
         return monthlyIndex
 
     def execRMA(self, windowSize=12, nFuture=12):
-        """execute ratio to moving average prediction"""
         self.addFutureDates(nFuture)
 
         validDf = self.df[self.df["Value"].notna()].copy()
@@ -200,21 +203,43 @@ class CO2Predictor:
             self.df["RMA_Pred"] = np.nan
 
         validIndices = self.df[self.df["Value"].notna()].index
+
+        # start rma from windowSize position like movingAvg
         for i, idx in enumerate(validIndices):
-            if i < len(ratio):
+            if i >= windowSize and i < len(ratio):
                 self.df.loc[idx, "RMA"] = ratio[i]
-            if i < len(paddedMa):
-                self.df.loc[idx, "MovingAvg"] = paddedMa[i]
 
-        idxSeasonal = self.seasonalIndex(validDf.assign(RMA=ratio), "RMA")
+        seasonalIdx = self.seasonalIndex(validDf.assign(RMA=ratio), "RMA")
 
+        # calculate rmaPred for historical data - start from windowSize like movingAvg
+        for i in range(windowSize, len(validDf)):
+            if i < len(validIndices):
+                validIdx = validIndices[i]
+                month = pd.to_datetime(self.df.loc[validIdx, "Date"]).month
+                seasonal = seasonalIdx.loc[month]
+
+                # check if movingAvg exists for the current position
+                if not pd.isna(self.df.loc[validIdx, "MovingAvg"]):
+                    movingAvgValue = self.df.loc[validIdx, "MovingAvg"]
+                else:
+                    # fallback to calculated value if movingAvg doesn't exist
+                    movingAvgValue = (
+                        paddedMa[i]
+                        if i < len(paddedMa)
+                        else np.mean(data[i - windowSize : i])
+                    )
+
+                self.df.loc[validIdx, "RMA_Pred"] = movingAvgValue * seasonal / 100
+
+        # predict future values
         lastDate = pd.to_datetime(validDf.iloc[-1]["Date"])
 
         for i in range(nFuture):
             futureDate = lastDate + relativedelta(months=i + 1)
+            # use last windowSize values for moving average
             ma = np.mean(data[-windowSize:])
             predMonth = futureDate.month
-            seasonal = idxSeasonal.loc[predMonth]
+            seasonal = seasonalIdx.loc[predMonth]
             pred = ma * seasonal / 100
 
             futureDateStr = futureDate.strftime("%Y-%m-%d")
@@ -224,17 +249,9 @@ class CO2Predictor:
 
             data = np.append(data, pred)
 
-        for i in range(windowSize - 1, len(validDf)):
-            validIdx = validIndices[i]
-            month = pd.to_datetime(self.df.loc[validIdx, "Date"]).month
-            seasonal = idxSeasonal.loc[month]
-            self.df.loc[validIdx, "RMA_Pred"] = (
-                self.df.loc[validIdx, "MovingAvg"] * seasonal / 100
-            )
-
         additionalInfo = {
             "window size": windowSize,
-            "seasonal index": dict(idxSeasonal.round(3)),
+            "seasonal index": dict(seasonalIdx.round(3)),
         }
         self.printResults("Ratio to Moving Average", "RMA_Pred", additionalInfo)
 
@@ -591,6 +608,42 @@ class CO2Predictor:
         }
         self.printResults("Linear Regression", "LinearRegPred", additionalInfo)
 
+    def execSVM(
+        self,
+        steps=12,
+        kernel="linear",
+        C=0.1,
+        gamma="auto",
+    ):
+        self.addFutureDates(steps)
+
+        dfCopy = self.df.copy()
+        dfCopy["Date"] = pd.to_datetime(dfCopy["Date"])
+
+        startDate = dfCopy["Date"].min()
+        dfCopy["timeIndex"] = (dfCopy["Date"] - startDate).dt.days / 30.44
+
+        validData = dfCopy.dropna(subset=["Value"])
+        x = validData["timeIndex"].values.reshape(-1, 1)
+        y = validData["Value"].values
+
+        model = SVR(kernel=kernel, C=C, gamma=gamma)
+        model.fit(x, y)
+
+        if "SVM" not in self.df.columns:
+            self.df["SVM"] = np.nan
+
+        allTimeIndex = (pd.to_datetime(self.df["Date"]) - startDate).dt.days / 30.44
+        allPredictions = model.predict(allTimeIndex.values.reshape(-1, 1))
+
+        for i, idx in enumerate(self.df.index):
+            self.df.loc[idx, "SVM"] = allPredictions[i]
+
+        additionalInfo = {
+            "R² score": f"{model.score(x, y):.6f}",
+        }
+        self.printResults("SVM", "SVM", additionalInfo)
+
     def plotTimeSeries(
         self, valueCol="Value", otherCols=None, title="CO2 Levels Over Time"
     ):
@@ -709,6 +762,7 @@ class CO2Predictor:
         self.execArima(nFuture=12, order=(5, 1, 5))
         self.execSarima(nFuture=12, order=(2, 0, 1), seasonalOrder=(0, 1, 2, 12))
         self.execLinearRegression(steps=12)
+        self.execSVM(steps=12)
 
         predictionCols = [
             "MovingAvg",
@@ -719,6 +773,7 @@ class CO2Predictor:
             "ArimaPred",
             "SarimaPred",
             "LinearRegPred",
+            "SVM",
         ]
 
         self.plotTimeSeries(
