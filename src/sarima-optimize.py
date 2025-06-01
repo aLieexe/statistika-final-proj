@@ -1,6 +1,6 @@
 import warnings
 from functools import partial
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 
 import numpy as np
 import pandas as pd
@@ -29,9 +29,6 @@ def evaluateSarimaModel(params, timeSeries, seasonalPeriod):
 def generateParamCombinations(
     maxP, maxD, maxQ, maxSeasonalP, maxSeasonalD, maxSeasonalQ
 ):
-    """
-    generate all parameter combinations for parallel processing
-    """
     combinations = []
     for p in range(maxP + 1):
         for d in range(maxD + 1):
