@@ -1,4 +1,5 @@
 import os
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,6 +10,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.svm import SVR
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+warnings.filterwarnings("ignore")
 
 
 class CO2Predictor:
@@ -173,9 +176,7 @@ class CO2Predictor:
         for i, idx in enumerate(futureRows[: len(predictions)]):
             self.df.loc[idx, "MovingAvg"] = predictions[i]
 
-        print("df", self.df.to_string())
-
-        self.printResults("Moving Average", "MovingAvg", {"window size": windowSize})
+        self.printResults("Moving Average", "MovingAvg")
 
     def ratioToMovingAverage(self, data, windowSize):
         ma = self.movingAvg(data, windowSize)
@@ -204,7 +205,6 @@ class CO2Predictor:
 
         validIndices = self.df[self.df["Value"].notna()].index
 
-        # start rma from windowSize position like movingAvg
         for i, idx in enumerate(validIndices):
             if i >= windowSize and i < len(ratio):
                 self.df.loc[idx, "RMA"] = ratio[i]
@@ -245,7 +245,6 @@ class CO2Predictor:
             data = np.append(data, pred)
 
         additionalInfo = {
-            "window size": windowSize,
             "seasonal index": dict(seasonalIdx.round(3)),
         }
         self.printResults("Ratio to Moving Average", "RMA_Pred", additionalInfo)
@@ -413,7 +412,6 @@ class CO2Predictor:
         print(f"\nARIMA{order} Model Summary:")
         print(f"AIC: {modelFit.aic:.4f}")
         print(f"BIC: {modelFit.bic:.4f}")
-        print(f"Log Likelihood: {modelFit.llf:.4f}")
 
         inSamplePred = modelFit.fittedvalues
 
@@ -449,7 +447,7 @@ class CO2Predictor:
         order=(1, 1, 1),
         seasonalOrder=(1, 1, 1, 12),
     ):
-        self.addFutureDates(nFuture) 
+        self.addFutureDates(nFuture)
         dfCopy = self.df.copy()
         dfCopy["Date"] = pd.to_datetime(dfCopy["Date"])
         dfCopy.set_index("Date", inplace=True)
@@ -522,7 +520,6 @@ class CO2Predictor:
             self.df.loc[idx, colName] = allPredictions[i]
 
         additionalInfo = {
-            "R² score": f"{model.score(x, y):.6f}",
             "coefficient": f"{model.coef_[0]:.6f}",
             "intercept": f"{model.intercept_:.6f}",
         }
@@ -561,10 +558,7 @@ class CO2Predictor:
         for i, idx in enumerate(self.df.index):
             self.df.loc[idx, colName] = allPredictions[i]
 
-        additionalInfo = {
-            "R² score": f"{model.score(x, y):.6f}",
-        }
-        self.printResults("SVR", colName, additionalInfo)
+        self.printResults("SVR", colName)
 
     def plotTimeSeries(
         self, valueCol="Value", otherCols=None, title="CO2 Levels Over Time"
@@ -776,5 +770,3 @@ if __name__ == "__main__":
     print("\nFinal DataFrame Preview:")
     print("=" * 60)
     print(resultDf.head(20))
-    print(f"\nTotal rows: {len(resultDf)}")
-    print(f"Columns: {list(resultDf.columns)}")
