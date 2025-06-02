@@ -34,9 +34,7 @@ def optimizeSvrParameters(
     nJobs=-1,
     scoring="neg_mean_squared_error",
 ):
-    print("setting up SVR parameter grid...")
-
-    # we want non linear, thus rbf,
+    # we want non linear, thus rbf
     pipeline = Pipeline([("scaler", StandardScaler()), ("svr", SVR(kernel="rbf"))])
 
     paramGrid = {

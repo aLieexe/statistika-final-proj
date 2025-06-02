@@ -34,9 +34,12 @@ class CO2Predictor:
                 "r2_adj": np.nan,
                 "rse": np.nan,
             }
-
         actual = validDf["Value"].values
         predicted = validDf[predictedColumnName].values
+
+        validMask = ~(np.isnan(actual) | np.isnan(predicted))
+        actual = actual[validMask]
+        predicted = predicted[validMask]
 
         errors = actual - predicted
         squaredErr = errors**2
@@ -46,14 +49,12 @@ class CO2Predictor:
         mse = np.mean(squaredErr)
         rmse = np.sqrt(mse)
 
-        # msle (mean squared logarithmic error)
         # only calculate if all values are positive
         if np.all(actual > 0) and np.all(predicted > 0):
             msle = np.mean((np.log1p(actual) - np.log1p(predicted)) ** 2)
         else:
             msle = np.nan
 
-        # mae
         mae = np.mean(absErr)
 
         # mape (mean absolute percentage error)
@@ -63,7 +64,6 @@ class CO2Predictor:
         else:
             mape = np.nan
 
-        # r² and correlation
         actualMean = np.mean(actual)
         TSS = np.sum((actual - actualMean) ** 2)
         RSS = np.sum(squaredErr)
@@ -71,21 +71,19 @@ class CO2Predictor:
         if TSS != 0:
             rSquared = 1 - (RSS / TSS)
 
-            actualStd = np.std(actual, ddof=1)
-            predictedStd = np.std(predicted, ddof=1)
+            rSquared = max(0.0, rSquared)
 
-            if actualStd != 0 and predictedStd != 0:
-                covariance = np.mean(
-                    (actual - np.mean(actual)) * (predicted - np.mean(predicted))
-                )
-                r = covariance / (actualStd * predictedStd)
-            else:
-                r = np.nan
+            r = np.sqrt(rSquared)
 
             n = len(actual)
 
             p = 1
-            rSquaredAdj = 1 - ((1 - rSquared) * (n - 1) / (n - p - 1))
+            if rSquared > 0:
+                rSquaredAdj = 1 - ((1 - rSquared) * (n - 1) / (n - p - 1))
+                rSquaredAdj = max(0.0, rSquaredAdj)
+            else:
+                rSquaredAdj = 0.0
+
             rse = np.sqrt(RSS / (n - 2))
         else:
             rSquared = np.nan
@@ -162,7 +160,7 @@ class CO2Predictor:
 
         self.df["MovingAvg"] = np.nan
 
-        for i in range(windowSize, len(validData) - 1):
+        for i in range(windowSize, len(validData)):
             previousValues = validData["Value"].iloc[i - windowSize : i].values
             movingAvg = np.mean(previousValues)
 
@@ -321,18 +319,18 @@ class CO2Predictor:
 
         return predictions
 
-    def execExponentialSmoothing(self, alpha=0.3, forecastHorizon=12):
+    def execExponentialSmoothing(self, colName, alpha=0.3, forecastHorizon=12):
         self.addFutureDates(forecastHorizon)
 
         actualValues = self.df["Value"].dropna().values
         smoothedValues = self.exponentialSmoothing(actualValues, alpha)
 
-        if "ExpSmooth" not in self.df.columns:
-            self.df["ExpSmooth"] = np.nan
+        if colName not in self.df.columns:
+            self.df[colName] = np.nan
 
         actualIndices = self.df["Value"].dropna().index
         for i, idx in enumerate(actualIndices):
-            self.df.loc[idx, "ExpSmooth"] = smoothedValues[i]
+            self.df.loc[idx, colName] = smoothedValues[i]
 
         predictions = self.predictWithExponentialSmoothing(
             actualValues, alpha, forecastHorizon
@@ -340,10 +338,10 @@ class CO2Predictor:
         futureRows = self.df[self.df["Value"].isna()].index
 
         for i, idx in enumerate(futureRows[: len(predictions)]):
-            self.df.loc[idx, "ExpSmooth"] = predictions[i]
+            self.df.loc[idx, colName] = predictions[i]
 
         additionalInfo = {"alpha": alpha, "forecast horizon": forecastHorizon}
-        self.printResults("Exponential Smoothing", "ExpSmooth", additionalInfo)
+        self.printResults("Exponential Smoothing", colName, additionalInfo)
 
     def execMonteCarlo(self, nFuture=12, nSim=1000, windowSize=12):
         self.addFutureDates(nFuture)
@@ -418,20 +416,19 @@ class CO2Predictor:
         if colName not in self.df.columns:
             self.df[colName] = np.nan
 
+        # known value predictions (for eval)
         validIndices = self.df["Value"].dropna().index
         for i, idx in enumerate(validIndices):
             if i < len(inSamplePred):
                 if i > 0:
                     self.df.loc[idx, colName] = inSamplePred.iloc[i]
 
-        # make future predictions
+        # future predictions
         forecast = modelFit.forecast(steps=nFuture)
         futureRows = self.df[self.df["Value"].isna()].index
 
         for i, idx in enumerate(futureRows[: len(forecast)]):
-            self.df.loc[idx, colName] = (
-                forecast.iloc[i] if hasattr(forecast, "iloc") else forecast[i]
-            )
+            self.df.loc[idx, colName] = forecast.iloc[i]
 
         additionalInfo = {
             "order": f"({order[0]}, {order[1]}, {order[2]})",
@@ -477,9 +474,7 @@ class CO2Predictor:
         futureRows = self.df[self.df["Value"].isna()].index
 
         for i, idx in enumerate(futureRows[: len(forecast)]):
-            self.df.loc[idx, colName] = (
-                forecast.iloc[i] if hasattr(forecast, "iloc") else forecast[i]
-            )
+            self.df.loc[idx, colName] = forecast.iloc[i]
 
         additionalInfo = {
             "order": f"({order[0]}, {order[1]}, {order[2]})",
@@ -672,7 +667,10 @@ class CO2Predictor:
         self.execMovingAvg(windowSize=12)
         self.execRMA(windowSize=12, nFuture=12)
         self.execPercentageAverage(nFuture=12)
-        self.execExponentialSmoothing(alpha=0.3, forecastHorizon=12)
+        self.execExponentialSmoothing(alpha=0.3, forecastHorizon=12, colName="ES-0.3")
+        self.execExponentialSmoothing(alpha=0.6, forecastHorizon=12, colName="ES-0.6")
+        self.execExponentialSmoothing(alpha=0.9, forecastHorizon=12, colName="ES-0.9")
+
         self.execMonteCarlo(nFuture=12, nSim=1000, windowSize=12)
         self.execArima(
             nFuture=12,
@@ -698,7 +696,7 @@ class CO2Predictor:
             colName="SARIMA-UNOPT",
         )
 
-        self.execLinearRegression(colName="LINREG-UNOPT", steps=12)
+        self.execLinearRegression(colName="LINREG", steps=12)
         self.execSVR(
             colName="SVR-UNOPT",
             steps=12,
@@ -721,13 +719,15 @@ class CO2Predictor:
             "MovingAvg",
             "RMA_Pred",
             "PercAvg_Pred",
-            "ExpSmooth",
+            "ES-0.3",
+            "ES-0.6",
+            "ES-0.9",
             "MonteCarlo_Pred",
             "ARIMA-OPT",
             "SARIMA-OPT",
             "ARIMA-UNOPT",
             "SARIMA-UNOPT",
-            "LINREG-UNOPT",
+            "LINREG",
             "SVR-UNOPT",
             "SVR-OPT",
         ]

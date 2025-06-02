@@ -37,7 +37,7 @@ def generateParamCombinations(maxP, maxD, maxQ):
 def findOptimalArima(
     timeSeries,
     maxP=5,
-    maxD=2,
+    maxD=5,
     maxQ=5,
     numProcesses=None,
 ):
